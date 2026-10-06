@@ -98,7 +98,7 @@ static int valid_name(const char *name)
 static void handle_command(int index, char *line)
 {
     Client *c = &clients[index];
-    char reply[MAX_LINE];
+    char reply[MAX_LINE + MAX_NAME + 64];
 
     if (strcmp(line, "QUIT") == 0) {
         send_all(c->fd, "OK BYE" TAG);
@@ -164,6 +164,71 @@ static void handle_command(int index, char *line)
 
         strcat(reply, TAG);
         send_all(c->fd, reply);
+        return;
+    }
+
+
+    if (strncmp(line, "BCAST ", 6) == 0) {
+        const char *message = line + 6;
+
+        if (message[strspn(message, " \t")] == '\0') {
+            send_all(c->fd, "ERR 005 EMPTY_MESSAGE" TAG);
+            return;
+        }
+
+        snprintf(reply, sizeof(reply),
+                 "MSG BCAST %s %s\n", c->username, message);
+        notify_others(index, reply);
+        send_all(c->fd, "OK SENT" TAG);
+        return;
+    }
+
+    if (strncmp(line, "PMSG ", 5) == 0) {
+        char *target = line + 5;
+        char *separator = strchr(target, ' ');
+
+        if (separator == NULL) {
+            send_all(c->fd, "ERR 005 INVALID_FORMAT" TAG);
+            return;
+        }
+
+        *separator = '\0';
+        const char *message = separator + 1;
+
+        if (!valid_name(target)) {
+            send_all(c->fd, "ERR 005 INVALID_USERNAME" TAG);
+            return;
+        }
+
+        if (message[strspn(message, " \t")] == '\0') {
+            send_all(c->fd, "ERR 005 EMPTY_MESSAGE" TAG);
+            return;
+        }
+
+        int recipient = -1;
+
+        for (int i = 0; i < MAX_CLIENTS; i++) {
+            if (clients[i].fd >= 0 &&
+                clients[i].username[0] != '\0' &&
+                strcmp(clients[i].username, target) == 0) {
+                recipient = i;
+                break;
+            }
+        }
+
+        if (recipient < 0) {
+            send_all(c->fd, "ERR 002 USER_NOT_FOUND" TAG);
+            return;
+        }
+
+        snprintf(reply, sizeof(reply),
+                 "MSG PRIV %s %s\n", c->username, message);
+
+        if (send_all(clients[recipient].fd, reply) < 0)
+            send_all(c->fd, "ERR 007 DELIVERY_FAILED" TAG);
+        else
+            send_all(c->fd, "OK SENT" TAG);
+
         return;
     }
 
@@ -256,7 +321,7 @@ int main(void)
 
     printf("NetMessenger server - IT23620452\n");
     printf("Listening on port %d | NID:6204\n", PORT);
-    printf("Commands: REGISTER, LIST, QUIT\n");
+    printf("Commands: REGISTER, LIST, BCAST, PMSG, QUIT\n");
     fflush(stdout);
 
     while (1) {
