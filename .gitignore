@@ -1,0 +1,6 @@
+/server_0452
+/client_0452
+*.o
+*.out
+/storage/
+/received/
