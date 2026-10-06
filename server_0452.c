@@ -26,6 +26,26 @@ typedef struct {
 
 static Client clients[MAX_CLIENTS];
 
+#define MAX_ROOMS 32
+
+typedef struct {
+    char name[MAX_NAME + 1];
+    int members[MAX_CLIENTS];
+} Room;
+
+static Room rooms[MAX_ROOMS];
+
+static int find_room(const char *name)
+{
+    for (int i = 0; i < MAX_ROOMS; i++) {
+        if (rooms[i].name[0] != '\0' &&
+            strcmp(rooms[i].name, name) == 0)
+            return i;
+    }
+    return -1;
+}
+
+
 static int send_all(int fd, const char *message)
 {
     size_t sent = 0;
@@ -61,6 +81,8 @@ static void remove_client(int index)
 
     char username[MAX_NAME + 1];
     strcpy(username, c->username);
+    for (int r = 0; r < MAX_ROOMS; r++)
+        rooms[r].members[index] = 0;
     close(c->fd);
     c->fd = -1;
     c->username[0] = '\0';
@@ -232,6 +254,133 @@ static void handle_command(int index, char *line)
         return;
     }
 
+
+    if (strncmp(line, "JOIN ", 5) == 0) {
+        const char *name = line + 5;
+
+        if (!valid_name(name)) {
+            send_all(c->fd, "ERR 005 INVALID_ROOM_NAME" TAG);
+            return;
+        }
+
+        int room = find_room(name);
+
+        if (room < 0) {
+            for (int i = 0; i < MAX_ROOMS; i++) {
+                if (rooms[i].name[0] == '\0') {
+                    room = i;
+                    strcpy(rooms[i].name, name);
+                    break;
+                }
+            }
+        }
+
+        if (room < 0) {
+            send_all(c->fd, "ERR 006 ROOM_LIMIT_REACHED" TAG);
+            return;
+        }
+
+        rooms[room].members[index] = 1;
+        snprintf(reply, sizeof(reply),
+                 "OK JOINED %s" TAG, name);
+        send_all(c->fd, reply);
+        return;
+    }
+
+    if (strcmp(line, "ROOMS") == 0) {
+        strcpy(reply, "OK ROOMS ");
+        int first = 1;
+
+        for (int i = 0; i < MAX_ROOMS; i++) {
+            if (rooms[i].name[0] != '\0') {
+                if (!first)
+                    strcat(reply, ",");
+                strcat(reply, rooms[i].name);
+                first = 0;
+            }
+        }
+
+        strcat(reply, TAG);
+        send_all(c->fd, reply);
+        return;
+    }
+
+    if (strncmp(line, "LEAVE ", 6) == 0) {
+        const char *name = line + 6;
+
+        if (!valid_name(name)) {
+            send_all(c->fd, "ERR 005 INVALID_ROOM_NAME" TAG);
+            return;
+        }
+
+        int room = find_room(name);
+
+        if (room < 0) {
+            send_all(c->fd, "ERR 003 ROOM_NOT_FOUND" TAG);
+            return;
+        }
+
+        if (!rooms[room].members[index]) {
+            send_all(c->fd, "ERR 005 NOT_IN_ROOM" TAG);
+            return;
+        }
+
+        rooms[room].members[index] = 0;
+        snprintf(reply, sizeof(reply),
+                 "OK LEFT %s" TAG, name);
+        send_all(c->fd, reply);
+        return;
+    }
+
+    if (strncmp(line, "RMSG ", 5) == 0) {
+        char *name = line + 5;
+        char *separator = strchr(name, ' ');
+
+        if (separator == NULL) {
+            send_all(c->fd, "ERR 005 INVALID_FORMAT" TAG);
+            return;
+        }
+
+        *separator = '\0';
+        const char *message = separator + 1;
+
+        if (!valid_name(name)) {
+            send_all(c->fd, "ERR 005 INVALID_ROOM_NAME" TAG);
+            return;
+        }
+
+        if (message[strspn(message, " \t")] == '\0') {
+            send_all(c->fd, "ERR 005 EMPTY_MESSAGE" TAG);
+            return;
+        }
+
+        int room = find_room(name);
+
+        if (room < 0) {
+            send_all(c->fd, "ERR 003 ROOM_NOT_FOUND" TAG);
+            return;
+        }
+
+        if (!rooms[room].members[index]) {
+            send_all(c->fd, "ERR 005 NOT_IN_ROOM" TAG);
+            return;
+        }
+
+        snprintf(reply, sizeof(reply),
+                 "MSG ROOM %s %s %s\n",
+                 name, c->username, message);
+
+        for (int i = 0; i < MAX_CLIENTS; i++) {
+            if (i != index && rooms[room].members[i] &&
+                clients[i].fd >= 0 &&
+                clients[i].username[0] != '\0')
+                send_all(clients[i].fd, reply);
+        }
+
+        send_all(c->fd, "OK SENT" TAG);
+        return;
+    }
+
     send_all(c->fd, "ERR 005 INVALID_COMMAND" TAG);
 }
 
@@ -321,7 +470,7 @@ int main(void)
 
     printf("NetMessenger server - IT23620452\n");
     printf("Listening on port %d | NID:6204\n", PORT);
-    printf("Commands: REGISTER, LIST, BCAST, PMSG, QUIT\n");
+    printf("Commands: REGISTER, LIST, BCAST, PMSG, JOIN, LEAVE, ROOMS, RMSG, QUIT\n");
     fflush(stdout);
 
     while (1) {
