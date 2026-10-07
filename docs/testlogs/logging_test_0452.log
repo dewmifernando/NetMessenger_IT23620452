@@ -1,0 +1,22 @@
+[2026-10-07 08:23:43+0530] SERVER_START registration=IT23620452 port=6452 NID=6204
+[2026-10-07 08:29:23+0530] SERVER_STOP registration=IT23620452
+[2026-10-07 10:16:22+0530] SERVER_START registration=IT23620452 port=6452 NID=6204
+[2026-10-07 10:16:51+0530] CONNECT fd=5 peer=127.0.0.1:55146
+[2026-10-07 10:17:07+0530] COMMAND fd=5 user=unregistered text=REGISTER alice
+[2026-10-07 10:17:07+0530] SEND_QUEUED fd=5 user=alice text=OK REGISTERED alice NID:6204
+[2026-10-07 10:17:41+0530] CONNECT fd=6 peer=127.0.0.1:37190
+[2026-10-07 10:17:49+0530] COMMAND fd=6 user=unregistered text=REGISTER bob
+[2026-10-07 10:17:49+0530] SEND_QUEUED fd=6 user=bob text=OK REGISTERED bob NID:6204
+[2026-10-07 10:17:49+0530] SEND_QUEUED fd=5 user=alice text=MSG JOIN bob
+[2026-10-07 10:18:32+0530] COMMAND fd=5 user=alice text=PMSG bob Logging tst message
+[2026-10-07 10:18:32+0530] SEND_QUEUED fd=6 user=bob text=MSG PRIV alice Logging tst message
+[2026-10-07 10:18:32+0530] SEND_QUEUED fd=5 user=alice text=OK SENT NID:6204
+[2026-10-07 10:24:36+0530] COMMAND fd=5 user=alice text=SENDFILE bob logtest_0452.txt 27
+[2026-10-07 10:24:36+0530] FILE_START user=alice target=bob filename=logtest_0452.txt bytes=27
+[2026-10-07 10:24:36+0530] FILE_QUEUED sender=alice recipient=bob filename=logtest_0452.txt bytes=27
+[2026-10-07 10:24:36+0530] SEND_QUEUED fd=5 user=alice text=OK FILE_RECEIVED logtest_0452.txt NID:6204
+[2026-10-07 10:24:36+0530] FILE_STORED user=alice path=storage/IT23620452/alice/logtest_0452.txt bytes=27
+[2026-10-07 10:26:49+0530] COMMAND fd=6 user=bob text=QUIT
+[2026-10-07 10:26:49+0530] SEND_QUEUED fd=6 user=bob text=OK BYE NID:6204
+[2026-10-07 10:26:49+0530] DISCONNECT fd=6 user=bob
+[2026-10-07 10:26:49+0530] SEND_QUEUED fd=5 user=alice text=MSG LEAVE bob

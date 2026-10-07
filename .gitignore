@@ -4,3 +4,5 @@
 *.out
 /storage/
 /received/
+
+/netmsg_IT23620452.log
