@@ -1,5 +1,6 @@
 #define _POSIX_C_SOURCE 200809L
 #include <stdio.h>
+#include <stdarg.h>
 #include <stdlib.h>
 #include <string.h>
 #include <errno.h>
@@ -55,6 +56,44 @@ static Client clients[MAX_CLIENTS];
 static Room rooms[MAX_ROOMS];
 static unsigned long next_generation;
 
+#define LOG_FILE "netmsg_IT23620452.log"
+static FILE *event_log;
+static volatile sig_atomic_t running = 1;
+
+static void stop_server(int signum)
+{
+    (void)signum;
+    running = 0;
+}
+
+static void log_event(const char *event, const char *format, ...)
+{
+    if (!event_log) return;
+    char detail[4096], timestamp[64];
+    va_list args;
+    va_start(args, format);
+    vsnprintf(detail, sizeof(detail), format, args);
+    va_end(args);
+    time_t now = time(NULL);
+    struct tm local;
+    if (localtime_r(&now, &local) &&
+        strftime(timestamp, sizeof(timestamp), "%Y-%m-%d %H:%M:%S%z", &local)) {
+        fprintf(event_log, "[%s] %s ", timestamp, event);
+    } else fprintf(event_log, "[time unavailable] %s ", event);
+    size_t length = strlen(detail);
+    while (length && (detail[length - 1] == '\n' || detail[length - 1] == '\r'))
+        length--;
+    for (size_t i = 0; i < length; i++) {
+        unsigned char ch = (unsigned char)detail[i];
+        if (ch < 32 || ch == 127 || ch == '\\')
+            fprintf(event_log, "\\x%02X", (unsigned int)ch);
+        else fputc(ch, event_log);
+    }
+    fputc('\n', event_log);
+    if (fflush(event_log) != 0) perror("log write");
+}
+
+
 static int find_room(const char *name)
 {
     for (int i = 0; i < MAX_ROOMS; i++)
@@ -109,8 +148,12 @@ static int send_all(int fd, const char *message)
 {
     for (int i = 0; i < MAX_CLIENTS; i++)
         if (clients[i].fd == fd) {
-            if (queue_bytes(&clients[i], message, strlen(message)) == 0)
+            if (queue_bytes(&clients[i], message, strlen(message)) == 0) {
+                log_event("SEND_QUEUED", "fd=%d user=%s text=%s", fd,
+                          clients[i].username[0] ? clients[i].username : "unregistered", message);
                 return 0;
+            }
+            log_event("SEND_FAILED", "fd=%d user=%s", fd, clients[i].username);
             shutdown(fd, SHUT_RDWR);
             return -1;
         }
@@ -131,6 +174,10 @@ static void remove_client(int index)
     if (c->fd < 0) return;
     char name[MAX_NAME + 1];
     strcpy(name, c->username);
+    log_event("DISCONNECT", "fd=%d user=%s", c->fd, name[0] ? name : "unregistered");
+    if (c->receiving)
+        log_event("FILE_ABORTED", "user=%s remaining=%llu", name,
+                  (unsigned long long)c->remaining);
     for (int r = 0; r < MAX_ROOMS; r++) rooms[r].members[index] = 0;
     if (c->upload) fclose(c->upload);
     if (c->temporary[0]) unlink(c->temporary);
@@ -176,6 +223,7 @@ static void finish_upload(int index)
         c->upload_error = "ERR 007 STORAGE_FAILED" TAG;
     if (c->upload_error) {
         if (c->temporary[0]) unlink(c->temporary);
+        log_event("FILE_REJECTED", "user=%s error=%s", c->username, c->upload_error);
         send_all(c->fd, c->upload_error);
     } else {
         char header[256];
@@ -191,10 +239,13 @@ static void finish_upload(int index)
                 if (!c->recipients[i]) continue;
                 if (clients[i].fd < 0 || clients[i].generation != c->generations[i] ||
                     queue_bytes(&clients[i], frame, frame_size) < 0) {
+                    log_event("FILE_DELIVERY_FAILED", "sender=%s filename=%s recipient_slot=%d",
+                              c->username, c->filename, i);
                     failed = 1;
                     if (clients[i].fd >= 0 && clients[i].generation == c->generations[i])
                         shutdown(clients[i].fd, SHUT_RDWR);
-                }
+                } else log_event("FILE_QUEUED", "sender=%s recipient=%s filename=%s bytes=%zu",
+                                 c->username, clients[i].username, c->filename, c->file_size);
             }
             free(frame);
         }
@@ -204,6 +255,8 @@ static void finish_upload(int index)
             snprintf(reply, sizeof(reply), "OK FILE_RECEIVED %s" TAG, c->filename);
             send_all(c->fd, reply);
         }
+        log_event("FILE_STORED", "user=%s path=%s bytes=%zu", c->username,
+                  c->destination, c->file_size);
         printf("File stored: %s (%zu bytes)\n", c->destination, c->file_size);
         fflush(stdout);
     }
@@ -229,6 +282,8 @@ static void start_upload(int index, char *args)
     char *end;
     uint64_t size = strtoull(size_text, &end, 10);
     if (errno || *end) goto malformed;
+    log_event("FILE_START", "user=%s target=%s filename=%s bytes=%llu",
+              c->username, target, filename, (unsigned long long)size);
     c->remaining = size;
     c->receiving = 1;
     c->last_activity = time(NULL);
@@ -282,6 +337,8 @@ malformed:
 }
 
 static void handle_command(int index, char *line)  {
+    log_event("COMMAND", "fd=%d user=%s text=%s", clients[index].fd,
+              clients[index].username[0] ? clients[index].username : "unregistered", line);
     Client *c = &clients[index];
     char reply[MAX_LINE + MAX_NAME + 64];
     if (strcmp(line, "QUIT") == 0)  {
@@ -557,7 +614,19 @@ int main(void)
     printf("Commands: REGISTER, LIST, BCAST, PMSG, JOIN, LEAVE, ROOMS, RMSG, SENDFILE, QUIT\n");
     printf("Maximum file size: %u bytes\n", MAX_FILE);
     fflush(stdout);
-    for (;;) {
+    event_log = fopen(LOG_FILE, "a");
+    if (!event_log) { perror("log open"); close(server_fd); return EXIT_FAILURE; }
+    struct sigaction action = {0};
+    action.sa_handler = stop_server;
+    sigemptyset(&action.sa_mask);
+    if (sigaction(SIGINT, &action, NULL) < 0 || sigaction(SIGTERM, &action, NULL) < 0) {
+        perror("signal setup"); fclose(event_log); close(server_fd); return EXIT_FAILURE;
+    }
+    log_event("SERVER_START", "registration=IT23620452 port=%d NID=6204", PORT);
+    printf("Logging to %s\n", LOG_FILE);
+    fflush(stdout);
+    int result = EXIT_SUCCESS;
+    while (running) {
         struct pollfd fds[MAX_CLIENTS + 1];
         fds[0] = (struct pollfd){server_fd, POLLIN, 0};
         for (int i = 0; i < MAX_CLIENTS; i++)
@@ -566,7 +635,7 @@ int main(void)
                         (clients[i].output_used ? POLLOUT : 0)), 0};
         if (poll(fds, MAX_CLIENTS + 1, 1000) < 0) {
             if (errno == EINTR) continue;
-            perror("poll"); break;
+            perror("poll"); result = EXIT_FAILURE; break;
         }
         for (int i = 0; i < MAX_CLIENTS; i++) {
             Client *c = &clients[i];
@@ -583,7 +652,9 @@ int main(void)
             if (c->fd >= 0 && c->closing && !c->output_used) remove_client(i);
         }
         if (fds[0].revents & POLLIN) {
-            int fd = accept(server_fd, NULL, NULL);
+            struct sockaddr_in peer = {0};
+            socklen_t peer_length = sizeof(peer);
+            int fd = accept(server_fd, (struct sockaddr *)&peer, &peer_length);
             if (fd < 0) { if (errno != EINTR) perror("accept"); continue; }
             int flags = fcntl(fd, F_GETFL, 0);
             if (flags < 0 || fcntl(fd, F_SETFL, flags | O_NONBLOCK) < 0) {
@@ -600,6 +671,10 @@ int main(void)
                 memset(&clients[slot], 0, sizeof(clients[slot]));
                 clients[slot].fd = fd;
                 clients[slot].generation = ++next_generation;
+                char peer_ip[INET_ADDRSTRLEN] = "unknown";
+                (void)inet_ntop(AF_INET, &peer.sin_addr, peer_ip, sizeof(peer_ip));
+                log_event("CONNECT", "fd=%d peer=%s:%u", fd, peer_ip,
+                          (unsigned int)ntohs(peer.sin_port));
                 clients[slot].last_activity = time(NULL);
                 printf("Client connected; waiting for REGISTER\n");
                 fflush(stdout);
@@ -608,5 +683,7 @@ int main(void)
     }
     for (int i = 0; i < MAX_CLIENTS; i++) remove_client(i);
     close(server_fd);
-    return EXIT_FAILURE;
+    log_event("SERVER_STOP", "registration=IT23620452");
+    if (fclose(event_log) != 0) { perror("log close"); result = EXIT_FAILURE; }
+    return result;
 }
